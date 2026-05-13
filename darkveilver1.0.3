@@ -98,16 +98,30 @@ function getAll() {
 
 function clickText(text) {
 
-  const all = getAll();
+  const key = normalize(text);
 
-  const target = all.find(el =>
-    normalize(el.textContent).includes(
-      normalize(text)
-    )
-  );
+  const candidates = getAll().filter(el => {
+
+    return normalize(el.textContent)
+      .includes(key);
+
+  });
+
+  // 一番短い要素を優先
+  candidates.sort((a, b) => {
+
+    return (
+      normalize(a.textContent).length -
+      normalize(b.textContent).length
+    );
+  });
+
+  const target = candidates[0];
 
   if (!target) {
+
     console.log(`[MISS] ${text}`);
+
     return false;
   }
 
@@ -117,20 +131,6 @@ function clickText(text) {
     target;
 
   return doClick(clickable, text);
-}
-
-function clickAtRatio(rx, ry, label) {
-
-  const x = window.innerWidth * rx;
-  const y = window.innerHeight * ry;
-
-  const target = document.elementFromPoint(x, y);
-
-  console.log(`[COORD CLICK] ${label}`, target);
-
-  if (!target) return false;
-
-  return doClick(target, label);
 }
 
 // ============================================================
