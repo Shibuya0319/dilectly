@@ -1,543 +1,642 @@
-// ============================================================
-// ダンジョン自動周回 + Lv100転生ループ 完全修正版
-// ============================================================
+// ==UserScript==
+// @name         Dark Veil Dungeon Rebirth Loop
+// @namespace    local.dark-veil
+// @version      0.2.0
+// @description  Dark Veil dungeon auto loop and Lv100 rebirth helper
+// @match        https://dark-veil.net/*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
 
-// ============================================================
-// 設定
-// ============================================================
+(() => {
+  "use strict";
 
-const INTERVAL = 3000;
-const TARGET_DUNGEON = "廃墟の聖堂";
-const TARGET_JOB = "虚ろ";
-// ============================================================
-// 通常探索ボタン（←プロトタイプ流用）
-// ============================================================
+  const STORAGE_KEY = "darkVeilDungeonLoop:v2";
 
-const COMMON_ACTIONS = [
-  "次の地へ",
-  "とじる",
-  "探索する",
-  "探索を続ける"
-];
+  const DEFAULT_CONFIG = {
+    enabled: false,
+    intervalMs: 3000,
+    cooldownMs: 1500,
+    targetDungeon: "廃墟の聖堂",
+    targetJob: "虚ろ",
+    autoSkill: true,
+  };
 
-// ============================================================
-// 状態
-// ============================================================
-
-let state = "EXPLORE";
-let lastActionTime = 0;
-
-// ============================================================
-// 共通関数
-// ============================================================
-
-function normalize(text) {
-  return String(text || "")
-    .replace(/\s+/g, "")
-    .trim();
-}
-
-function cooldown(ms = 1500) {
-  const now = Date.now();
-
-  if (now - lastActionTime < ms) {
-    return false;
-  }
-
-  lastActionTime = now;
-  return true;
-}
-
-function doClick(el, label) {
-
-  if (!el) return false;
-  if (!cooldown()) return false;
-
-  const rect = el.getBoundingClientRect();
-
-  const x = rect.left + rect.width / 2;
-  const y = rect.top + rect.height / 2;
-
-  const events = [
-    'pointerdown',
-    'mousedown',
-    'pointerup',
-    'mouseup',
-    'click'
+  const COMMON_ACTIONS = [
+    "次の地へ",
+    "とじる",
+    "閉じる",
+    "探索する",
+    "探索を続ける",
   ];
 
-  events.forEach(type => {
+  const STATE_LABELS = {
+    EXPLORE: "探索中",
+    RETURN_TO_BASE: "拠点へ戻る",
+    OPEN_REBIRTH_ENTRY: "転生導線を開く",
+    OPEN_PREPARE: "準備を開く",
+    OPEN_REINCARNATION: "転生を開く",
+    SELECT_JOB: "職業選択",
+    SELECT_SKILL: "スキル選択",
+    CONFIRM_CLASS: "生き方決定",
+    CONFIRM_REINCARNATION: "転生確認",
+    GO_TO_BASE: "拠点へ",
+    START_EXPLORE: "探索開始",
+    SELECT_DUNGEON: "ダンジョン選択",
+  };
 
-    const ev = new MouseEvent(type, {
-      view: window,
-      bubbles: true,
-      cancelable: true,
-      clientX: x,
-      clientY: y,
-      buttons: 1
-    });
+  const runtime = {
+    state: "EXPLORE",
+    lastActionTime: 0,
+    status: "停止中",
+    timerId: null,
+  };
 
-    el.dispatchEvent(ev);
-  });
+  let config = loadConfig();
 
-  console.log(
-    `%c[${new Date().toLocaleTimeString()}] ${label}`,
-    "color:#00ff7f;font-weight:bold;"
-  );
-
-  return true;
-}
-
-function getAll() {
-  return Array.from(
-    document.querySelectorAll(
-      'button, div, span, a, p, [role="button"]'
-    )
-  );
-}
-
-function clickText(text) {
-
-  const key = normalize(text);
-
-  const candidates = getAll().filter(el => {
-
-    return normalize(el.textContent)
-      .includes(key);
-
-  });
-
-  // 一番短い要素を優先
-  candidates.sort((a, b) => {
-
-    return (
-      normalize(a.textContent).length -
-      normalize(b.textContent).length
-    );
-  });
-
-  const target = candidates[0];
-
-  if (!target) {
-
-    console.log(`[MISS] ${text}`);
-
-    return false;
+  function loadConfig() {
+    try {
+      return { ...DEFAULT_CONFIG, ...JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}") };
+    } catch {
+      return { ...DEFAULT_CONFIG };
+    }
   }
 
-  const clickable =
-    target.closest('button') ||
-    target.closest('[role="button"]') ||
-    target;
-
-  return doClick(clickable, text);
-}
-
-// ============================================================
-// Lv100判定
-// ============================================================
-
-function isLv100() {
-
-  const text = normalize(
-    document.body.innerText
-  );
-
-  return (
-    text.includes("転生可能")
-  );
-}
-
-// ============================================================
-// 戻るボタン
-// ============================================================
-
-function clickReturnButton() {
-
-  if (!cooldown()) return false;
-
-  // 左上のダンジョン名付近
-  const x = window.innerWidth * 0.18;
-  const y = window.innerHeight * 0.08;
-
-  const target = document.elementFromPoint(x, y);
-
-  console.log(
-    "[RETURN TARGET]",
-    target
-  );
-
-  if (!target) {
-    console.log("[MISS] 戻り先座標なし");
-    return false;
+  function saveConfig() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
   }
 
-  const events = [
-    'pointerdown',
-    'mousedown',
-    'pointerup',
-    'mouseup',
-    'click'
-  ];
+  function normalize(text) {
+    return String(text || "").replace(/\s+/g, "").trim();
+  }
 
-  events.forEach(type => {
+  function gameRoot() {
+    return document.querySelector("#game-root") || document.body;
+  }
 
-    target.dispatchEvent(
-      new MouseEvent(type, {
+  function bodyText() {
+    return normalize(gameRoot().innerText || document.body.innerText || "");
+  }
+
+  function hasText(text) {
+    return bodyText().includes(normalize(text));
+  }
+
+  function visible(el) {
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+  }
+
+  function cooldown(ms = config.cooldownMs) {
+    const now = Date.now();
+    if (now - runtime.lastActionTime < ms) return false;
+    runtime.lastActionTime = now;
+    return true;
+  }
+
+  function log(label, color = "#00ff7f") {
+    runtime.status = label;
+    renderPanel();
+    console.log(`%c[${new Date().toLocaleTimeString()}] ${label}`, `color:${color};font-weight:bold;`);
+  }
+
+  function getAll() {
+    return Array.from(gameRoot().querySelectorAll("button, div, span, a, p, [role='button']"))
+      .filter(visible);
+  }
+
+  function clickableOf(el) {
+    if (!el) return null;
+    return el.closest("button") || el.closest("[role='button']") || el.closest("a") || el;
+  }
+
+  function isDisabled(el) {
+    return !el
+      || el.disabled
+      || el.getAttribute("aria-disabled") === "true"
+      || Boolean(el.closest("button:disabled,[aria-disabled='true']"));
+  }
+
+  function debugSnapshot(reason = "snapshot") {
+    const rows = getAll()
+      .map((el) => {
+        const clickable = clickableOf(el);
+        const rect = el.getBoundingClientRect();
+        return {
+          text: normalize(el.textContent).slice(0, 80),
+          tag: el.tagName.toLowerCase(),
+          clickableTag: clickable ? clickable.tagName.toLowerCase() : "",
+          disabled: isDisabled(clickable),
+          children: el.children.length,
+          x: Math.round(rect.left),
+          y: Math.round(rect.top),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+        };
+      })
+      .filter((row) => row.text)
+      .sort((a, b) => a.text.length - b.text.length)
+      .slice(0, 80);
+
+    console.group(`[DarkVeilLoop DEBUG] ${reason} / state=${runtime.state}`);
+    console.log("bodyText", bodyText().slice(0, 1200));
+    console.table(rows);
+    console.groupEnd();
+    return rows;
+  }
+
+  function dispatchClick(el, label, options = {}) {
+    if (!el) return false;
+    if (isDisabled(el)) {
+      console.log(`[DISABLED] ${label || normalize(el.textContent)}`);
+      return false;
+    }
+    if (!options.skipCooldown && !cooldown()) return false;
+
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    const eventTypes = ["pointerdown", "mousedown", "pointerup", "mouseup", "click"];
+
+    eventTypes.forEach((type) => {
+      const EventClass = type.startsWith("pointer") && window.PointerEvent ? window.PointerEvent : window.MouseEvent;
+      el.dispatchEvent(new EventClass(type, {
         view: window,
         bubbles: true,
         cancelable: true,
         clientX: x,
         clientY: y,
-        buttons: 1
-      })
-    );
-  });
+        buttons: 1,
+        pointerId: 1,
+        pointerType: "mouse",
+        isPrimary: true,
+      }));
+    });
 
-  console.log(
-    "%c拠点へ戻るクリック",
-    "color:orange;font-weight:bold;"
-  );
+    log(label || `クリック: ${normalize(el.textContent)}`);
+    return true;
+  }
 
-  return true;
-}
+  function clickAtRatio(rx, ry, label) {
+    if (!cooldown()) return false;
+    const base = gameRoot().getBoundingClientRect();
+    const x = Math.round(base.left + base.width * rx);
+    const y = Math.round(base.top + base.height * ry);
+    const target = document.elementFromPoint(x, y);
 
-// ============================================================
-// スキル選択
-// ============================================================
+    if (!target) {
+      log(`[MISS] ${label}: 座標先なし`, "orange");
+      return false;
+    }
 
-function chooseAnySkill() {
+    ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((type) => {
+      const EventClass = type.startsWith("pointer") && window.PointerEvent ? window.PointerEvent : window.MouseEvent;
+      target.dispatchEvent(new EventClass(type, {
+        view: window,
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+        buttons: 1,
+        pointerId: 1,
+        pointerType: "mouse",
+        isPrimary: true,
+      }));
+    });
 
-  const all = getAll();
+    log(label, "orange");
+    return true;
+  }
 
-  // よくある継承UI除外
-  const blacklist = [
-    "この生き方を選ぶ",
-    "転生する",
-    "とじる",
-    "戻る"
-  ];
+  function shortestTextMatch(text, options = {}) {
+    const key = normalize(text);
+    const exact = Boolean(options.exact);
+    const leafOnly = options.leafOnly !== false;
+    const scope = options.scope || gameRoot();
+    const matches = getAll().filter((el) => {
+      if (!scope.contains(el)) return false;
+      const t = normalize(el.textContent);
+      if (!t) return false;
+      if (leafOnly && el.children.length > 0 && !el.closest("button,[role='button']")) return false;
+      return exact ? t === key : t.includes(key);
+    });
 
-  // スキル候補らしきもの
-  const candidates = all.filter(el => {
+    matches.sort((a, b) => normalize(a.textContent).length - normalize(b.textContent).length);
+    return matches[0] || null;
+  }
 
-    const text = normalize(el.textContent);
+  function clickText(text, options) {
+    const target = shortestTextMatch(text, options);
+    if (!target) {
+      console.log(`[MISS] ${text}`);
+      return false;
+    }
 
-    return (
-      text.length > 0 &&
-      text.length < 20 &&
-      el.children.length === 0 &&
-      !blacklist.some(b =>
-        text.includes(normalize(b))
-      )
-    );
-  });
+    const clickable = clickableOf(target);
+    return dispatchClick(clickable, text);
+  }
 
-  console.log(
-    "[SKILL CANDIDATES]",
-    candidates.map(el => el.textContent)
-  );
+  function findJobTarget(jobName) {
+    const wanted = normalize(jobName);
+    if (!wanted) return null;
 
-  if (candidates.length === 0) {
+    const unique = [];
+    const seen = new Set();
+
+    for (const el of getAll()) {
+      const clickable = clickableOf(el);
+      if (!clickable || seen.has(clickable) || isDisabled(clickable)) continue;
+      seen.add(clickable);
+
+      const elText = normalize(el.textContent);
+      const clickableText = normalize(clickable.textContent);
+      if (!elText.includes(wanted) && !clickableText.includes(wanted)) continue;
+
+      let score = clickableText.length;
+      if (elText === wanted) score -= 1000;
+      if (clickableText === wanted) score -= 800;
+      if (clickable.matches("button,[role='button']")) score -= 80;
+      if (/Lv\.?\d+|EXP|HP|装備|戦闘力|ランキング|更新|探索|拠点|準備/.test(clickableText)) score += 600;
+      if (clickableText.includes("転生する") || clickableText.includes("この生き方を選ぶ")) score += 1000;
+
+      unique.push({ el, clickable, text: clickableText, score });
+    }
+
+    unique.sort((a, b) => a.score - b.score);
+    console.table(unique.slice(0, 10).map((item) => ({
+      score: item.score,
+      text: item.text.slice(0, 100),
+      tag: item.clickable.tagName,
+      children: item.clickable.children.length,
+    })));
+
+    return unique[0] ? unique[0].clickable : null;
+  }
+
+  function clickReturnButton() {
+    return clickAtRatio(0.18, 0.08, "拠点へ戻るクリック");
+  }
+
+  function isLv100() {
+    return bodyText().includes("転生可能");
+  }
+
+  function chooseAnySkill() {
+    if (!config.autoSkill) return false;
+
+    const blacklist = [
+      "この生き方を選ぶ",
+      "転生する",
+      "とじる",
+      "閉じる",
+      "戻る",
+      "キャンセル",
+    ].map(normalize);
+
+    const candidates = getAll().filter((el) => {
+      const text = normalize(el.textContent);
+      return text.length > 0
+        && text.length < 28
+        && el.children.length === 0
+        && !/^(Lv\.?\d+|EXP|HP|\d+\/\d+)$/.test(text)
+        && !blacklist.some((item) => text.includes(item));
+    });
+
+    console.log("[SKILL CANDIDATES]", candidates.map((el) => el.textContent));
+    if (candidates.length === 0) return false;
+    return dispatchClick(candidates[0], `スキル選択: ${candidates[0].textContent}`);
+  }
+
+  function clickCommonExploreAction() {
+    const all = getAll();
+    for (const text of COMMON_ACTIONS) {
+      const key = normalize(text);
+      const target = all.find((el) => normalize(el.textContent).includes(key) && el.children.length === 0);
+      if (target) {
+        const clickable = target.closest("button") || target.closest("[role='button']") || target;
+        return dispatchClick(clickable, text);
+      }
+    }
     return false;
   }
 
-  // 一番上を選択
-  return doClick(
-    candidates[0],
-    `スキル選択: ${candidates[0].textContent}`
-  );
-}
+  function setState(nextState, message) {
+    runtime.state = nextState;
+    log(message || `STATE: ${STATE_LABELS[nextState] || nextState}`, "#87cefa");
+  }
 
-// ============================================================
-// メインループ
-// ============================================================
+  function mainLoop() {
+    if (!config.enabled) return;
 
-function mainLoop() {
+    console.log(`%c[STATE] ${runtime.state}`, "color:#87cefa;font-weight:bold;");
+    renderPanel();
 
-  console.log(
-    `%c[STATE] ${state}`,
-    "color:#87cefa;font-weight:bold;"
-  );
-
-  // ========================================================
-  // 通常探索
-  // ========================================================
-
-  if (state === "EXPLORE") {
-
-    // Lv100検知
-    if (isLv100()) {
-
-      console.log(
-        "%cLv100検知 → 拠点へ戻る",
-        "color:orange;font-weight:bold;"
-      );
-
-      state = "RETURN_TO_BASE";
+    if (hasText("転生が完了")) {
+      if (clickText("とじる") || clickText("閉じる")) {
+        setState("GO_TO_BASE", "転生完了ダイアログを閉じる");
+      } else {
+        setState("GO_TO_BASE", "転生完了を検知");
+      }
       return;
     }
 
-    // ===== プロトタイプ探索処理 =====
-
-    const allElements = Array.from(
-      document.querySelectorAll(
-        'button, div, span, a, p'
-      )
-    );
-
-    for (const text of COMMON_ACTIONS) {
-
-      const target = allElements.find(el =>
-        el.textContent.includes(text) &&
-        el.children.length === 0
-      );
-
-      if (target) {
-
-        const clickable =
-          target.closest('button') ||
-          target.closest('[role="button"]') ||
-          target;
-
-        doClick(clickable, text);
+    if (runtime.state === "EXPLORE") {
+      if (isLv100()) {
+        setState("RETURN_TO_BASE", "Lv100/転生可能検知 → 拠点へ戻る");
         return;
       }
-    }
 
-    console.log(
-      "[EXPLORE] 通常探索ボタンなし"
-    );
+      if (clickCommonExploreAction()) return;
 
-    return;
-  }
-
-  // ========================================================
-  // 拠点へ戻る
-  // ========================================================
-
-  if (state === "RETURN_TO_BASE") {
-
-    if (clickReturnButton()) {
-
-      state = "OPEN_PREPARE";
-    }
-
-    return;
-  }
-
-  // ========================================================
-  // 準備
-  // ========================================================
-
-  if (state === "OPEN_PREPARE") {
-
-    // 下タブ中央付近
-    if (
-      clickText("準備") ||
-      clickAtRatio(0.50, 0.93, "準備タブ")
-    ) {
-
-      state = "OPEN_REINCARNATION";
-    }
-
-    return;
-  }
-
-  // ========================================================
-  // 転生画面
-  // ========================================================
-
-  if (state === "OPEN_REINCARNATION") {
-
-    if (clickText("転生")) {
-
-      state = "SELECT_JOB";
-    }
-
-    return;
-  }
-
-  // ========================================================
-  // 職業選択
-  // ========================================================
-
-  if (state === "SELECT_JOB") {
-
-    const target = getAll().find(el =>
-      normalize(el.textContent) ===
-      normalize(TARGET_JOB)
-    );
-
-    if (target) {
-
-      doClick(
-        target,
-        `職業選択: ${TARGET_JOB}`
-      );
-
-      state = "SELECT_SKILL";
-
+      console.log("[EXPLORE] 通常探索ボタンなし");
+      runtime.status = "探索ボタン待機中";
+      renderPanel();
       return;
     }
 
-    console.log("[MISS] 職業が見つかりません");
-
-    return;
-  }
-
-  // ========================================================
-  // スキル選択
-  // ========================================================
-
-  if (state === "SELECT_SKILL") {
-
-    // スキル継承画面
-    if (chooseAnySkill()) {
-
-      state = "CONFIRM_CLASS";
-
+    if (runtime.state === "RETURN_TO_BASE") {
+      if (clickReturnButton()) setState("OPEN_PREPARE");
       return;
     }
 
-    // 継承なし
-    if (clickText("この生き方を選ぶ")) {
-
-      state = "CONFIRM_REINCARNATION";
-
+    if (runtime.state === "OPEN_REBIRTH_ENTRY") {
+      if (clickText("準備") || clickAtRatio(0.30, 0.93, "準備タブ")) {
+        setState("OPEN_REINCARNATION");
+      }
       return;
     }
 
-    return;
-  }
-
-  // ========================================================
-  // 生き方決定
-  // ========================================================
-
-  if (state === "CONFIRM_CLASS") {
-
-    if (clickText("この生き方を選ぶ")) {
-
-      state = "CONFIRM_REINCARNATION";
+    if (runtime.state === "OPEN_PREPARE") {
+      if (clickText("準備") || clickAtRatio(0.30, 0.93, "準備タブ")) {
+        setState("OPEN_REINCARNATION");
+      }
+      return;
     }
 
-    return;
-  }
-
-  // ========================================================
-  // 転生確認
-  // ========================================================
-
-if (state === "CONFIRM_REINCARNATION") {
-
-  const body = normalize(document.body.innerText);
-
-  const dialogOpened =
-    body.includes("生まれ変わる") ||
-    body.includes("元には戻れない");
-
-  // まだ確認ダイアログがない
-  if (!dialogOpened) {
-
-    clickText("転生する");
-
-    return;
-  }
-
-  // ダイアログ表示後
-  const all = getAll();
-
-  const confirmBtn = all.find(el => {
-
-    const t = normalize(el.textContent);
-
-    return (
-      t === "転生する" &&
-      el.children.length === 0
-    );
-  });
-
-  if (confirmBtn) {
-
-    doClick(confirmBtn, "最終転生確認");
-
-    state = "GO_TO_BASE";
-
-    return;
-  }
-
-  return;
-}
-  // ========================================================
-  // 拠点
-  // ========================================================
-
-  if (state === "GO_TO_BASE") {
-
-    if (
-      clickText("拠点") ||
-      clickAtRatio(0.18, 0.93, "拠点タブ")
-    ) {
-
-      state = "START_EXPLORE";
+    if (runtime.state === "OPEN_REINCARNATION") {
+      if (clickText("転生", { leafOnly: false }) || clickText("転生可能", { leafOnly: false })) {
+        setState("SELECT_JOB");
+      }
+      return;
     }
 
-    return;
-  }
-  // ========================================================
-  // 探索開始
-  // ========================================================
+    if (runtime.state === "SELECT_JOB") {
+      const exactTarget = getAll().find((el) => normalize(el.textContent) === normalize(config.targetJob));
+      const target = exactTarget || shortestTextMatch(config.targetJob, { leafOnly: false });
+      if (target && !hasText("転生が完了")) {
+        dispatchClick(target.closest("button") || target.closest("[role='button']") || target, `職業選択: ${config.targetJob}`);
+        setState("SELECT_SKILL");
+        return;
+      }
 
-  if (state === "START_EXPLORE") {
+      if (clickText("転生", { leafOnly: false }) || clickText("転生可能", { leafOnly: false })) {
+        runtime.status = `職業待機中: ${config.targetJob}`;
+        renderPanel();
+        return;
+      }
 
-    if (
-      clickText("探索") ||
-      clickAtRatio(0.34, 0.93, "探索タブ")
-    ) {
-
-      state = "SELECT_DUNGEON";
+      console.log(`[MISS] 職業が見つかりません: ${config.targetJob}`);
+      runtime.status = `職業待機中: ${config.targetJob}`;
+      renderPanel();
+      return;
     }
 
-    return;
-  }
+    if (runtime.state === "SELECT_SKILL") {
+      if (clickText("この生き方を選ぶ")) {
+        setState("CONFIRM_REINCARNATION");
+        return;
+      }
 
-  // ========================================================
-  // ダンジョン選択
-  // ========================================================
+      if (chooseAnySkill()) {
+        setState("CONFIRM_CLASS");
+        return;
+      }
 
-  if (state === "SELECT_DUNGEON") {
-
-    if (clickText(TARGET_DUNGEON)) {
-
-      console.log(
-        "%c探索再開",
-        "color:#00ff7f;font-weight:bold;"
-      );
-
-      state = "EXPLORE";
+      runtime.status = "スキル/生き方ボタン待機中";
+      renderPanel();
+      return;
     }
 
-    return;
+    if (runtime.state === "CONFIRM_CLASS") {
+      if (clickText("この生き方を選ぶ")) setState("CONFIRM_REINCARNATION");
+      return;
+    }
+
+    if (runtime.state === "CONFIRM_REINCARNATION") {
+      const text = bodyText();
+      const dialogOpened = text.includes("生まれ変わる") || text.includes("元には戻れない");
+
+      if (!dialogOpened) {
+        clickText("転生する");
+        return;
+      }
+
+      const confirmButton = getAll().find((el) => normalize(el.textContent) === "転生する" && el.children.length === 0);
+      if (confirmButton) {
+        dispatchClick(confirmButton.closest("button") || confirmButton, "最終転生確認");
+        setState("GO_TO_BASE");
+      }
+      return;
+    }
+
+    if (runtime.state === "GO_TO_BASE") {
+      if (clickText("とじる") || clickText("閉じる")) return;
+      if (clickText("拠点") || clickAtRatio(0.18, 0.93, "拠点タブ")) {
+        setState("START_EXPLORE");
+      }
+      return;
+    }
+
+    if (runtime.state === "START_EXPLORE") {
+      if (clickText("探索") || clickAtRatio(0.34, 0.93, "探索タブ")) {
+        setState("SELECT_DUNGEON");
+      }
+      return;
+    }
+
+    if (runtime.state === "SELECT_DUNGEON") {
+      if (clickText(config.targetDungeon)) {
+        setState("EXPLORE", "探索再開");
+      } else {
+        runtime.status = `ダンジョン待機中: ${config.targetDungeon}`;
+        renderPanel();
+      }
+    }
   }
-}
 
-// ============================================================
-// 起動
-// ============================================================
+  function startLoop() {
+    stopLoop(false);
+    runtime.state = "EXPLORE";
+    runtime.lastActionTime = 0;
+    runtime.status = "起動しました";
+    runtime.timerId = window.setInterval(mainLoop, config.intervalMs);
+    window.dungeonMaster = runtime.timerId;
+    log("完全修正版マクロ起動");
+  }
 
-if (window.dungeonMaster) {
-  clearInterval(window.dungeonMaster);
-}
+  function stopLoop(updateStatus = true) {
+    if (runtime.timerId) {
+      window.clearInterval(runtime.timerId);
+      runtime.timerId = null;
+    }
+    if (window.dungeonMaster) {
+      window.clearInterval(window.dungeonMaster);
+      window.dungeonMaster = null;
+    }
+    if (updateStatus) {
+      runtime.status = "停止中";
+      renderPanel();
+    }
+  }
 
-window.dungeonMaster =
-  setInterval(mainLoop, INTERVAL);
+  function createPanel() {
+    const style = document.createElement("style");
+    style.textContent = `
+      #dv-auto-panel {
+        position: fixed; right: 12px; bottom: 12px; z-index: 2147483647;
+        width: 286px; color: #c8c8c0; background: rgba(20,22,20,.95);
+        border: 1px solid #948161; font: 12px/1.5 system-ui, sans-serif;
+        box-shadow: 0 8px 24px rgba(0,0,0,.45);
+      }
+      #dv-auto-panel * { box-sizing: border-box; }
+      #dv-auto-panel header { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-bottom: 1px solid #242F35; color: #948161; }
+      #dv-auto-panel main { display: grid; gap: 8px; padding: 10px; }
+      #dv-auto-panel label { display: grid; gap: 3px; color: #a0a09a; }
+      #dv-auto-panel input { width: 100%; border: 1px solid #242F35; background: #040605; color: #c8c8c0; padding: 6px; font: inherit; outline: none; }
+      #dv-auto-panel button { border: 1px solid #948161; background: transparent; color: #948161; padding: 6px 8px; cursor: pointer; }
+      #dv-auto-panel button.primary { background: #948161; color: #222; }
+      #dv-auto-panel .row { display: flex; gap: 6px; }
+      #dv-auto-panel .row > button { flex: 1; }
+      #dv-auto-panel .check { display: flex; align-items: center; gap: 6px; color: #a0a09a; }
+      #dv-auto-panel .check input { width: auto; }
+      #dv-auto-status { color: #c8c8c0; min-height: 18px; word-break: break-all; }
+    `;
+    document.documentElement.appendChild(style);
 
-console.log(
-  "%c完全修正版マクロ起動",
-  "color:#00ff7f;font-size:16px;font-weight:bold;"
-);
+    const panel = document.createElement("section");
+    panel.id = "dv-auto-panel";
+    panel.innerHTML = `
+      <header>
+        <strong>Dark Veil Loop</strong>
+        <span id="dv-auto-mode"></span>
+      </header>
+      <main>
+        <label>周回ダンジョン<input id="dv-auto-dungeon"></label>
+        <label>転生職業<input id="dv-auto-job"></label>
+        <label>間隔(ms)<input id="dv-auto-interval" inputmode="numeric"></label>
+        <label class="check"><input id="dv-auto-skill" type="checkbox">スキルを自動選択</label>
+        <div id="dv-auto-status"></div>
+        <div class="row">
+          <button id="dv-auto-toggle" class="primary"></button>
+          <button id="dv-auto-reset">状態リセット</button>
+        </div>
+      </main>
+    `;
+    document.body.appendChild(panel);
 
-console.log(
-  "停止: clearInterval(window.dungeonMaster)"
-);
+    const els = {
+      mode: panel.querySelector("#dv-auto-mode"),
+      dungeon: panel.querySelector("#dv-auto-dungeon"),
+      job: panel.querySelector("#dv-auto-job"),
+      interval: panel.querySelector("#dv-auto-interval"),
+      skill: panel.querySelector("#dv-auto-skill"),
+      status: panel.querySelector("#dv-auto-status"),
+      toggle: panel.querySelector("#dv-auto-toggle"),
+      reset: panel.querySelector("#dv-auto-reset"),
+    };
+
+    function syncInputs() {
+      els.dungeon.value = config.targetDungeon;
+      els.job.value = config.targetJob;
+      els.interval.value = String(config.intervalMs);
+      els.skill.checked = config.autoSkill;
+    }
+
+    function applyInputs() {
+      config = {
+        ...config,
+        targetDungeon: els.dungeon.value.trim() || DEFAULT_CONFIG.targetDungeon,
+        targetJob: els.job.value.trim() || DEFAULT_CONFIG.targetJob,
+        intervalMs: Math.max(1000, Number(els.interval.value) || DEFAULT_CONFIG.intervalMs),
+        autoSkill: els.skill.checked,
+      };
+      saveConfig();
+    }
+
+    els.toggle.addEventListener("click", () => {
+      applyInputs();
+      config.enabled = !config.enabled;
+      saveConfig();
+      if (config.enabled) startLoop();
+      else stopLoop();
+      renderPanel();
+    });
+
+    els.reset.addEventListener("click", () => {
+      applyInputs();
+      runtime.state = "EXPLORE";
+      runtime.lastActionTime = 0;
+      runtime.status = "状態をEXPLOREに戻しました";
+      renderPanel();
+    });
+
+    [els.dungeon, els.job, els.interval, els.skill].forEach((el) => {
+      el.addEventListener("change", () => {
+        applyInputs();
+        if (runtime.timerId) {
+          window.clearInterval(runtime.timerId);
+          runtime.timerId = window.setInterval(mainLoop, config.intervalMs);
+          window.dungeonMaster = runtime.timerId;
+        }
+        renderPanel();
+      });
+    });
+
+    window.__dvAutoEls = els;
+    syncInputs();
+  }
+
+  function renderPanel() {
+    const els = window.__dvAutoEls;
+    if (!els) return;
+    els.mode.textContent = config.enabled ? "ON" : "OFF";
+    els.toggle.textContent = config.enabled ? "停止" : "開始";
+    els.status.textContent = `${STATE_LABELS[runtime.state] || runtime.state}: ${runtime.status}`;
+  }
+
+  createPanel();
+  renderPanel();
+
+  if (config.enabled) startLoop();
+
+  window.darkVeilLoop = {
+    start() {
+      config.enabled = true;
+      saveConfig();
+      startLoop();
+      renderPanel();
+    },
+    stop() {
+      config.enabled = false;
+      saveConfig();
+      stopLoop();
+      renderPanel();
+    },
+    reset() {
+      runtime.state = "EXPLORE";
+      runtime.lastActionTime = 0;
+      runtime.status = "状態をEXPLOREに戻しました";
+      renderPanel();
+    },
+    debug(reason) {
+      return debugSnapshot(reason);
+    },
+    state: runtime,
+    config,
+  };
+
+  console.log("%cDark Veil dungeon loop loaded", "color:#00ff7f;font-size:16px;font-weight:bold;");
+  console.log("停止: window.darkVeilLoop.stop() または clearInterval(window.dungeonMaster)");
+})();
