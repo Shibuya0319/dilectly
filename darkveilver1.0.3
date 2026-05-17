@@ -17,9 +17,11 @@
     enabled: false,
     intervalMs: 3000,
     cooldownMs: 1500,
+    startDungeon: "廃墟の聖堂",
     targetDungeon: "廃墟の聖堂",
     targetJob: "虚ろ",
     autoSkill: true,
+    targetSkill: "",
   };
 
   const COMMON_ACTIONS = [
@@ -38,6 +40,7 @@
     OPEN_REINCARNATION: "転生を開く",
     SELECT_JOB: "職業選択",
     SELECT_SKILL: "スキル選択",
+    CONFIRM_SKILL_REBIRTH: "スキル選択後の転生",
     CONFIRM_CLASS: "生き方決定",
     CONFIRM_REINCARNATION: "転生確認",
     GO_TO_BASE: "拠点へ",
@@ -50,6 +53,7 @@
     lastActionTime: 0,
     status: "停止中",
     timerId: null,
+    forceStartDungeon: false,
   };
 
   let config = loadConfig();
@@ -210,6 +214,58 @@
     return true;
   }
 
+  function clickDialogConfirm(label = "確認ボタン") {
+    if (!cooldown()) return false;
+
+    const rootEl = gameRoot();
+    const buttons = Array.from(rootEl.querySelectorAll("button, [role='button']"))
+      .filter((el) => visible(el) && !isDisabled(el));
+    const exact = buttons.find((el) => normalize(el.textContent) === normalize("転生する"));
+    if (exact) {
+      runtime.lastActionTime = 0;
+      return dispatchClick(exact, label);
+    }
+
+    const dialogLike = getAll()
+      .filter((el) => {
+        const text = normalize(el.textContent);
+        const rect = el.getBoundingClientRect();
+        return text.includes(normalize("生まれ変わる"))
+          && text.includes(normalize("転生する"))
+          && rect.width > 220
+          && rect.height > 120;
+      })
+      .sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        return (ar.width * ar.height) - (br.width * br.height);
+      })[0];
+
+    const base = (dialogLike || rootEl).getBoundingClientRect();
+    const x = Math.round(base.left + base.width * 0.72);
+    const y = Math.round(base.top + base.height * 0.82);
+    const target = document.elementFromPoint(x, y);
+    if (!target) return false;
+
+    ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((type) => {
+      const EventClass = type.startsWith("pointer") && window.PointerEvent ? window.PointerEvent : window.MouseEvent;
+      target.dispatchEvent(new EventClass(type, {
+        view: window,
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+        buttons: 1,
+        pointerId: 1,
+        pointerType: "mouse",
+        isPrimary: true,
+      }));
+    });
+
+    log(label, "orange");
+    return true;
+  }
+
   function shortestTextMatch(text, options = {}) {
     const key = normalize(text);
     const exact = Boolean(options.exact);
@@ -293,20 +349,109 @@
       "閉じる",
       "戻る",
       "キャンセル",
+      "習得可能スキル",
+      "マスター済",
     ].map(normalize);
 
-    const candidates = getAll().filter((el) => {
+    const masterLabel = normalize("マスター済");
+    const learnableLabel = normalize("習得可能スキル");
+    const masterSkillLabel = normalize("マスターするスキル");
+    const chooseOneLabel = normalize("転生後もどの生き方でも使えるスキルを1つ選ぶ");
+
+    const nearText = (el, depth = 3) => {
+      let node = el;
+      let text = "";
+      for (let i = 0; node && i < depth; i += 1) {
+        text = normalize(node.textContent);
+        if (text.includes(masterLabel)) return text;
+        node = node.parentElement;
+      }
+      return text;
+    };
+
+    const currentText = bodyText();
+    const skillScreen = currentText.includes(learnableLabel)
+      || currentText.includes(masterSkillLabel)
+      || currentText.includes(chooseOneLabel);
+
+    const targetSkill = normalize(config.targetSkill || "");
+    const all = getAll();
+    const rootRect = gameRoot().getBoundingClientRect();
+    const navWords = ["世代", "開く", "ルーン", "拠点", "準備", "血盟", "市場", "メニュー"]
+      .map(normalize);
+    const skillCardText = (el) => {
+      const name = normalize(el.textContent);
+      let node = el.parentElement;
+      for (let i = 0; node && i < 5; i += 1) {
+        const rect = node.getBoundingClientRect();
+        const text = normalize(node.textContent);
+        if (
+          text.startsWith(name)
+          && text.length > name.length + 10
+          && rect.width > rootRect.width * 0.55
+          && rect.height >= 42
+          && rect.height <= 150
+        ) {
+          return text;
+        }
+        node = node.parentElement;
+      }
+      return "";
+    };
+
+    const candidates = all.filter((el) => {
       const text = normalize(el.textContent);
+      const rowText = nearText(el, 4);
+      const rect = el.getBoundingClientRect();
+      const cardText = skillCardText(el);
       return text.length > 0
-        && text.length < 28
+        && (skillScreen ? text.length >= 2 && text.length <= 8 : text.length < 28)
         && el.children.length === 0
-        && !/^(Lv\.?\d+|EXP|HP|\d+\/\d+)$/.test(text)
+        && skillScreen
+        && rect.top > rootRect.top + 80
+        && rect.bottom < rootRect.bottom - 90
+        && cardText
+        && !rowText.includes(masterLabel)
+        && !cardText.includes(masterLabel)
+        && !text.includes(masterLabel)
+        && !text.includes(learnableLabel)
+        && !text.includes(masterSkillLabel)
+        && !text.includes(chooseOneLabel)
+        && !text.includes(normalize("転生する"))
+        && !/^(Lv\.?\d+|EXP|HP|\d+\/\d+|\d+)$/.test(text)
+        && !navWords.includes(text)
         && !blacklist.some((item) => text.includes(item));
     });
 
-    console.log("[SKILL CANDIDATES]", candidates.map((el) => el.textContent));
+    candidates.sort((a, b) => {
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      const at = normalize(a.textContent);
+      const bt = normalize(b.textContent);
+      const aTarget = targetSkill && at === targetSkill ? -10000 : 0;
+      const bTarget = targetSkill && bt === targetSkill ? -10000 : 0;
+      return (aTarget + ar.top + at.length / 10)
+        - (bTarget + br.top + bt.length / 10);
+    });
+
+    console.log("[SKILL CANDIDATES]", candidates.map((el) => normalize(el.textContent)));
     if (candidates.length === 0) return false;
-    return dispatchClick(candidates[0], `スキル選択: ${candidates[0].textContent}`);
+    const selected = targetSkill
+      ? candidates.find((el) => normalize(el.textContent) === targetSkill)
+      : candidates[0];
+
+    if (!selected) {
+      console.log(`[MISS] 指定スキルが見つかりません: ${config.targetSkill}`);
+      return false;
+    }
+
+    return dispatchClick(clickableOf(selected), `スキル選択: ${normalize(selected.textContent).slice(0, 30)}`);
+  }
+
+  function isSkillMasterScreen() {
+    const text = bodyText();
+    return text.includes(normalize("マスターするスキル"))
+      || text.includes(normalize("転生後もどの生き方でも使えるスキルを1つ選ぶ"));
   }
 
   function clickCommonExploreAction() {
@@ -335,8 +480,10 @@
 
     if (hasText("転生が完了")) {
       if (clickText("とじる") || clickText("閉じる")) {
+        runtime.forceStartDungeon = true;
         setState("GO_TO_BASE", "転生完了ダイアログを閉じる");
       } else {
+        runtime.forceStartDungeon = true;
         setState("GO_TO_BASE", "転生完了を検知");
       }
       return;
@@ -404,6 +551,17 @@
     }
 
     if (runtime.state === "SELECT_SKILL") {
+      if (isSkillMasterScreen()) {
+        if (chooseAnySkill()) {
+          setState("CONFIRM_SKILL_REBIRTH");
+          return;
+        }
+
+        runtime.status = "未マスターのスキル待機中";
+        renderPanel();
+        return;
+      }
+
       if (clickText("この生き方を選ぶ")) {
         setState("CONFIRM_REINCARNATION");
         return;
@@ -419,14 +577,34 @@
       return;
     }
 
+    if (runtime.state === "CONFIRM_SKILL_REBIRTH") {
+      if (clickText("転生する") || clickDialogConfirm("スキル選択後の転生する")) {
+        setState("CONFIRM_REINCARNATION");
+      }
+      return;
+    }
+
     if (runtime.state === "CONFIRM_CLASS") {
       if (clickText("この生き方を選ぶ")) setState("CONFIRM_REINCARNATION");
       return;
     }
 
     if (runtime.state === "CONFIRM_REINCARNATION") {
+      if (isSkillMasterScreen()) {
+        if (chooseAnySkill()) {
+          setState("CONFIRM_SKILL_REBIRTH", "マスターするスキルを選択");
+          return;
+        }
+
+        runtime.status = "マスターするスキル待機中";
+        renderPanel();
+        return;
+      }
+
       const text = bodyText();
-      const dialogOpened = text.includes("生まれ変わる") || text.includes("元には戻れない");
+      const dialogOpened = text.includes("生まれ変わる")
+        || text.includes("元には戻れない")
+        || text.includes("戻れない");
 
       if (!dialogOpened) {
         clickText("転生する");
@@ -436,6 +614,13 @@
       const confirmButton = getAll().find((el) => normalize(el.textContent) === "転生する" && el.children.length === 0);
       if (confirmButton) {
         dispatchClick(confirmButton.closest("button") || confirmButton, "最終転生確認");
+        runtime.forceStartDungeon = true;
+        setState("GO_TO_BASE");
+        return;
+      }
+
+      if (clickDialogConfirm("最終転生確認")) {
+        runtime.forceStartDungeon = true;
         setState("GO_TO_BASE");
       }
       return;
@@ -457,10 +642,12 @@
     }
 
     if (runtime.state === "SELECT_DUNGEON") {
-      if (clickText(config.targetDungeon)) {
+      const dungeon = runtime.forceStartDungeon ? config.startDungeon : config.targetDungeon;
+      if (clickText(dungeon)) {
+        runtime.forceStartDungeon = false;
         setState("EXPLORE", "探索再開");
       } else {
-        runtime.status = `ダンジョン待機中: ${config.targetDungeon}`;
+        runtime.status = `ダンジョン待機中: ${dungeon}`;
         renderPanel();
       }
     }
@@ -523,8 +710,10 @@
         <span id="dv-auto-mode"></span>
       </header>
       <main>
-        <label>周回ダンジョン<input id="dv-auto-dungeon"></label>
+        <label>転生後の開始ダンジョン<input id="dv-auto-start-dungeon"></label>
+        <label>通常の目標ダンジョン<input id="dv-auto-dungeon"></label>
         <label>転生職業<input id="dv-auto-job"></label>
+        <label>マスターするスキル<input id="dv-auto-target-skill" placeholder="空欄なら先頭候補"></label>
         <label>間隔(ms)<input id="dv-auto-interval" inputmode="numeric"></label>
         <label class="check"><input id="dv-auto-skill" type="checkbox">スキルを自動選択</label>
         <div id="dv-auto-status"></div>
@@ -538,8 +727,10 @@
 
     const els = {
       mode: panel.querySelector("#dv-auto-mode"),
+      startDungeon: panel.querySelector("#dv-auto-start-dungeon"),
       dungeon: panel.querySelector("#dv-auto-dungeon"),
       job: panel.querySelector("#dv-auto-job"),
+      targetSkill: panel.querySelector("#dv-auto-target-skill"),
       interval: panel.querySelector("#dv-auto-interval"),
       skill: panel.querySelector("#dv-auto-skill"),
       status: panel.querySelector("#dv-auto-status"),
@@ -548,8 +739,10 @@
     };
 
     function syncInputs() {
+      els.startDungeon.value = config.startDungeon || DEFAULT_CONFIG.startDungeon;
       els.dungeon.value = config.targetDungeon;
       els.job.value = config.targetJob;
+      els.targetSkill.value = config.targetSkill || "";
       els.interval.value = String(config.intervalMs);
       els.skill.checked = config.autoSkill;
     }
@@ -557,8 +750,10 @@
     function applyInputs() {
       config = {
         ...config,
+        startDungeon: els.startDungeon.value.trim() || DEFAULT_CONFIG.startDungeon,
         targetDungeon: els.dungeon.value.trim() || DEFAULT_CONFIG.targetDungeon,
         targetJob: els.job.value.trim() || DEFAULT_CONFIG.targetJob,
+        targetSkill: els.targetSkill.value.trim(),
         intervalMs: Math.max(1000, Number(els.interval.value) || DEFAULT_CONFIG.intervalMs),
         autoSkill: els.skill.checked,
       };
@@ -582,7 +777,7 @@
       renderPanel();
     });
 
-    [els.dungeon, els.job, els.interval, els.skill].forEach((el) => {
+    [els.startDungeon, els.dungeon, els.job, els.targetSkill, els.interval, els.skill].forEach((el) => {
       el.addEventListener("change", () => {
         applyInputs();
         if (runtime.timerId) {
