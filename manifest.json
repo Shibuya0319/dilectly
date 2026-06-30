@@ -1,0 +1,32 @@
+{
+  "name": "dark-veil-Autoclicker",
+  "version": "1.0.3",
+  "manifest_version": 3,
+  "description": "オートクリックツール",
+  "icons": {
+    "16": "icons/dark-veil16px.png",
+    "48": "icons/dark-veil48px.png",
+    "128": "icons/dark-veil128px.png"
+  },
+  "permissions": [
+    "storage",
+    "tabs",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "https://dark-veil.net/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://dark-veil.net/*"],
+      "js": [
+        "js/dark-veil-Autoclicker/darkveilver1.0.3.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Clicker",
+    "default_popup": "popup/popup.html"
+  }
+}
