@@ -20,14 +20,11 @@
     {
       "matches": ["https://dark-veil.net/*"],
       "js": [
-        "js/darkveilver1.0.3.js"
+        "js/dark-veil-Autoclicker/darkveilver1.0.3.js"
       ],
       "run_at": "document_idle"
     }
   ],
-  "background": {
-    "service_worker": "js/background.js"
-  },
   "action": {
     "default_title": "Clicker",
     "default_popup": "popup/popup.html"
